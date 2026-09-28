@@ -1,0 +1,67 @@
+{# Create/edit event dialog. Open with any element carrying data-event:
+   data-event="null" → create; data-event='{{ {"action": ..., "title": ..., "date": ..., "thumb": ...}|tojson }}' → edit #}
+<dialog id="event-dialog" class="dialog" aria-labelledby="ed-heading">
+  <form method="post" enctype="multipart/form-data" class="stack">
+    <div class="row">
+      <h2 id="ed-heading" style="margin:0">New event</h2>
+      <button type="button" class="link" data-close aria-label="Close" style="font-size:1.5rem;line-height:1">×</button>
+    </div>
+    <input type="hidden" name="next">
+    <label class="field">Title <input name="title" required placeholder="Annual Gala 2026"></label>
+    <label class="field">Date <input name="date" type="date" required></label>
+    <div>
+      <label class="field">Thumbnail <span class="opt" id="ed-hint">(optional)</span></label>
+      <label class="drop" style="margin-top:6px">
+        <input name="thumbnail" type="file" accept=".jpg,.jpeg,.png,.webp">
+        <strong id="ed-file">Choose cover image</strong>
+        <span class="muted">JPG, PNG or WebP</span>
+      </label>
+    </div>
+    <label id="ed-remove"><input type="checkbox" name="remove_thumb" value="1"> Remove current thumbnail</label>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" type="button" data-close>Cancel</button>
+      <button class="btn" id="ed-submit">Create event</button>
+    </div>
+  </form>
+</dialog>
+<script src="{{ url_for('static', filename='compress.js') }}"></script>
+<script>
+(() => {
+  const d = document.getElementById('event-dialog'), f = d.querySelector('form'), el = f.elements;
+  const $ = id => document.getElementById(id);
+
+  function open(ev) { // null = create, else {action, title, date, thumb}
+    f.reset();
+    $('ed-file').textContent = 'Choose cover image';
+    f.action = ev ? ev.action : {{ url_for('new_event')|tojson }};
+    el.next.value = location.pathname;
+    el.title.value = ev ? ev.title : '';
+    el.date.value = ev ? ev.date : '';
+    $('ed-heading').textContent = ev ? 'Edit event' : 'New event';
+    $('ed-submit').textContent = ev ? 'Save changes' : 'Create event';
+    $('ed-hint').textContent = ev && ev.thumb ? '(leave empty to keep current)' : '(optional)';
+    $('ed-remove').hidden = !(ev && ev.thumb);
+    d.showModal();
+  }
+
+  // cover is shrunk before upload: max 1280px wide, JPEG 85%
+  f.addEventListener('submit', async e => {
+    const file = el.thumbnail.files[0];
+    if (!file) return;
+    e.preventDefault();
+    $('ed-submit').disabled = true;
+    $('ed-submit').textContent = 'Saving…';
+    const dt = new DataTransfer();
+    dt.items.add(await compressImage(file, 1280, Infinity, 0.85));
+    el.thumbnail.files = dt.files;
+    f.submit(); // native submit: skips this handler, validation already passed
+  });
+
+  el.thumbnail.onchange = () => $('ed-file').textContent = el.thumbnail.files[0]?.name || 'Choose cover image';
+  d.addEventListener('click', e => { if (e.target === d || e.target.closest('[data-close]')) d.close(); });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-event]');
+    if (b) { e.preventDefault(); open(JSON.parse(b.dataset.event)); }
+  });
+})();
+</script>

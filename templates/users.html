@@ -1,0 +1,91 @@
+{% extends 'base.html' %}
+{% block title %}Users · Picmatch admin{% endblock %}
+{% block body %}
+<div class="cols">
+  <form class="card stack" method="post">
+    <h2>New user</h2>
+    <p class="muted" style="margin:0;font-size:.9rem">Users log in at <a href="{{ url_for('login') }}">{{ url_for('login', _external=True) }}</a> to manage their events.</p>
+    <label class="field">Username <input name="username" required minlength="3" maxlength="32" pattern="[\w.\-]+"
+           autocomplete="off" value="{{ request.form.username or '' }}"></label>
+    <label class="field">Password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="field">Confirm password <input name="confirm" type="password" required minlength="8" autocomplete="new-password"></label>
+    {% if error %}<p class="note bad" role="alert">{{ error }}</p>{% endif %}
+    {% if created %}<p class="note" role="status">User <strong>{{ created }}</strong> created. They can log in now.</p>{% endif %}
+    <button class="btn block">Create user</button>
+  </form>
+
+  <section class="card stack">
+    <h2>Users <span class="muted">({{ users|length }})</span></h2>
+    {% if reset %}<p class="note" role="status">Password for <strong>{{ reset }}</strong> changed. They were logged out everywhere.</p>{% endif %}
+    {% if reset_error %}<p class="note bad" role="alert">Password for <strong>{{ reset_error }}</strong> not changed: it must be at least 8 characters and both fields must match.</p>{% endif %}
+    {% if users %}
+    <ul class="userlist">
+      {% for u in users %}
+      <li class="row">
+        <div class="grow">
+          <strong>{{ u.username }}</strong>
+          <span class="pill {{ 'ready' if u.active else 'empty' }}">{{ 'Active' if u.active else 'Inactive' }}</span>
+          <div class="muted" style="font-size:.85rem">{{ u.events }} event{{ '' if u.events == 1 else 's' }} · since {{ u.created_at[:10] }}</div>
+        </div>
+        <form method="post" action="{{ url_for('set_active', uid=u.id) }}">
+          <input type="hidden" name="active" value="{{ 0 if u.active else 1 }}">
+          <button class="btn ghost">{{ 'Deactivate' if u.active else 'Activate' }}</button>
+        </form>
+        <button class="btn ghost" type="button" data-pw-user="{{ url_for('reset_password', uid=u.id) }}"
+                data-name="{{ u.username }}">Reset password</button>
+        <button class="btn ghost bad" type="button" data-del-user="{{ url_for('delete_user', uid=u.id) }}"
+                data-name="{{ u.username }}">Delete</button>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted" style="margin:0">No users yet.</p>
+    {% endif %}
+  </section>
+</div>
+
+<dialog id="pw-dialog" class="dialog" aria-labelledby="pw-heading">
+  <form method="post" class="stack">
+    <h2 id="pw-heading" style="margin:0">Reset password</h2>
+    <p class="muted" style="margin:0">New password for <strong id="pw-name"></strong>. They'll be logged out on all devices.</p>
+    <label class="field">New password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="field">Confirm password <input name="confirm" type="password" required minlength="8" autocomplete="new-password"></label>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" type="button" onclick="this.closest('dialog').close()">Cancel</button>
+      <button class="btn">Set password</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="del-user-dialog" class="dialog" aria-labelledby="du-heading">
+  <form method="post" class="stack">
+    <h2 id="du-heading" style="margin:0">Delete user?</h2>
+    <p style="margin:0"><strong id="du-name"></strong> will no longer be able to log in and is removed from this list.
+      Their events and photos are kept, and attendee links keep working.</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" type="button" onclick="this.closest('dialog').close()">Cancel</button>
+      <button class="btn danger">Delete user</button>
+    </div>
+  </form>
+</dialog>
+<script>
+const pwForm = document.querySelector('#pw-dialog form');
+pwForm.confirm.oninput = () => pwForm.confirm.setCustomValidity(
+  pwForm.confirm.value === pwForm.password.value ? '' : "Passwords don't match");
+document.addEventListener('click', e => {
+  const p = e.target.closest('[data-pw-user]');
+  if (p) {
+    pwForm.reset();
+    pwForm.action = p.dataset.pwUser;
+    document.getElementById('pw-name').textContent = p.dataset.name;
+    document.getElementById('pw-dialog').showModal();
+  }
+  const b = e.target.closest('[data-del-user]');
+  if (!b) return;
+  const d = document.getElementById('del-user-dialog');
+  d.querySelector('form').action = b.dataset.delUser;
+  document.getElementById('du-name').textContent = b.dataset.name;
+  d.showModal();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,12 @@
+{
+  "name": "picmatch",
+  "private": true,
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@vladmandic/face-api": "1.7.15",
+    "canvas": "^3.1.1"
+  },
+  "devDependencies": {
+    "node-gyp": "^13.0.2"
+  }
+}

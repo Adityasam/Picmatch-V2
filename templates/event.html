@@ -1,0 +1,274 @@
+{% extends 'base.html' %}
+{% block title %}{{ ev.title }} · Picmatch{% endblock %}
+{% block nav %}<a href="{{ url_for('admin') }}">&larr; All events</a>{% endblock %}
+{% block body %}
+<div class="head">
+  {% if ev.thumb %}<img class="avatar" src="{{ url_for('thumb', slug=slug, v=ev.thumb) }}" alt="">
+  {% else %}<div class="avatar cover">{{ ev.title[:1] | upper }}</div>{% endif %}
+  <div class="grow">
+    <h1>{{ ev.title }}</h1>
+    <span class="muted">{{ ev.date }}</span>
+  </div>
+  <button class="btn ghost" type="button"
+          data-event='{{ {"action": url_for("edit_event", slug=slug), "title": ev.title, "date": ev.date, "thumb": ev.thumb}|tojson }}'>Edit</button>
+  <button class="btn ghost bad" type="button"
+          data-delete='{{ {"action": url_for("delete_event", slug=slug), "title": ev.title}|tojson }}'>Delete</button>
+</div>
+
+<div class="cols">
+  <div class="stack">
+    <section class="card stack">
+      <h2 style="margin:0">Upload photos</h2>
+      <label class="drop sm" id="drop">
+        <input id="files" type="file" multiple accept=".jpg,.jpeg,.png,.webp">
+        <strong id="picked">Drop photos or click to browse</strong>
+        <span class="muted">Up to {{ max_images }} · JPG, PNG, WebP</span>
+      </label>
+      <button class="btn block" id="up" disabled>Upload</button>
+      <div class="bar" id="upbar" hidden><i></i></div>
+      <p class="note" id="upmsg"></p>
+    </section>
+
+    <section class="card stack">
+      <div class="row">
+        <h2 style="margin:0">Face processing</h2>
+        <span class="pill" id="pill"></span>
+      </div>
+      <div class="bar" id="procbar"><i></i></div>
+      <p class="muted" id="status" style="margin:0"></p>
+      <button class="btn ghost" id="process" hidden>Process now</button>
+
+      <div id="share" class="stack" hidden>
+        <h3 style="margin:0">Share with attendees</h3>
+        <div class="copy">
+          <input id="url" readonly value="{{ public_url }}" aria-label="Attendee link">
+          <button class="btn ghost" id="copy" type="button">Copy</button>
+        </div>
+        <div class="row" style="align-items:flex-start">
+          <div class="qr" style="width:120px;padding:8px"><img src="{{ url_for('qr', slug=slug) }}" alt="QR code for attendee link"></div>
+          <div class="stack grow">
+            <a class="btn ghost block" href="{{ public_url }}" target="_blank">Open page</a>
+            <a class="btn ghost block" href="{{ url_for('qr', slug=slug) }}" download="{{ slug }}-qr.svg">Download QR</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card stack">
+    <div class="row">
+      <h2 style="margin:0">Selected photos <span class="muted" id="pickcount"></span></h2>
+      <button class="link" id="clear" type="button" hidden>Clear all</button>
+    </div>
+    <p class="muted center" id="noPicks" style="margin:24px 0">Photos you pick will show here. Remove any you don't want before uploading.</p>
+    <div class="grid preview" id="preview"></div>
+  </section>
+</div>
+
+<section class="card stack" style="margin-top:20px">
+  <div class="row">
+    <h2 style="margin:0">Event photos <span class="muted" id="photocount"></span></h2>
+    <div class="pager" id="pager" hidden>
+      <button class="btn ghost" id="prev" type="button" aria-label="Previous page">&larr;</button>
+      <span class="muted" id="pageinfo"></span>
+      <button class="btn ghost" id="next" type="button" aria-label="Next page">&rarr;</button>
+    </div>
+  </div>
+  <p class="muted center" id="nophotos" style="margin:24px 0" hidden></p>
+  <p class="note" id="photomsg"></p>
+  <div class="grid preview photos" id="photos"></div>
+</section>
+
+<dialog id="view-dialog" class="dialog viewer" aria-label="Photo">
+  <img id="view-img" alt="Event photo">
+  <button type="button" class="close" aria-label="Close">×</button>
+</dialog>
+
+<dialog id="del-dialog" class="dialog" aria-labelledby="del-heading">
+  <form method="dialog" class="stack">
+    <h2 id="del-heading" style="margin:0">Delete this photo?</h2>
+    <img id="del-img" alt="" style="display:block;width:100%;max-height:260px;object-fit:contain;border-radius:10px;background:var(--bg)">
+    <p class="muted" style="margin:0">It will be removed from the event and attendees won't find it anymore. This can't be undone.</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn danger" value="delete">Delete</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const MAX = {{ max_images }}, BATCH = 20;
+const base = '/admin/e/{{ slug }}';
+const $ = id => document.getElementById(id);
+let st = {{ status|tojson }};
+
+function render() {
+  const done = st.total - st.pending;
+  const label = { empty: 'No photos', queued: 'Queued', processing: 'Processing', pending: 'Not processed', ready: 'Ready', failed: 'Failed' };
+  const msg = { empty: 'Upload photos to start.',
+                queued: `Waiting in queue. ${st.pending} photos to process. You can leave this page.`,
+                processing: `Detecting faces… ${done} of ${st.total} photos. You can leave this page.`,
+                pending: `${st.pending} photos not processed yet.`,
+                ready: `${st.total} photos processed.`,
+                failed: `${st.pending} photos not processed. Check data/{{ slug }}/encode.log.` };
+  $('pill').className = 'pill ' + (st.state === 'queued' ? 'processing' : st.state === 'pending' ? 'empty' : st.state);
+  $('pill').textContent = label[st.state];
+  $('status').textContent = msg[st.state];
+  $('procbar').firstElementChild.style.width = st.total ? (100 * done / st.total) + '%' : '0';
+  $('share').hidden = st.state !== 'ready';
+  $('process').hidden = st.state !== 'failed' && st.state !== 'pending';
+  $('process').textContent = st.state === 'failed' ? 'Retry processing' : 'Process now';
+}
+
+async function poll() {
+  const was = st.state;
+  st = await (await fetch(base + '/status')).json();
+  if (was !== st.state || st.state === 'processing') loadPhotos(); // face counts change while processing
+  render();
+  clearTimeout(poll.t);
+  if (st.state === 'processing' || st.state === 'queued') poll.t = setTimeout(poll, 3000);
+}
+
+// selected files waiting for upload: [{file, url, el}]
+// ponytail: previews use the full-size files with lazy loading; make small thumbnails if 1000-photo batches get slow
+let queue = [];
+const OK = /\.(jpe?g|png|webp)$/i;
+
+function picked() {
+  const n = queue.length;
+  $('noPicks').hidden = !!n; $('clear').hidden = !n;
+  $('pickcount').textContent = n ? `(${n})` : '';
+  $('picked').textContent = n ? 'Add more photos' : 'Drop photos or click to browse';
+  $('up').disabled = !n;
+  $('up').textContent = n ? `Upload ${n} photo${n === 1 ? '' : 's'}` : 'Upload';
+}
+
+function add(files) {
+  for (const file of files) {
+    if (!OK.test(file.name)) continue;
+    const item = { file, url: URL.createObjectURL(file), el: document.createElement('div') };
+    item.el.innerHTML = `<img loading="lazy" alt=""><button type="button" aria-label="Remove ${file.name}" title="Remove">×</button>`;
+    item.el.firstChild.src = item.url;
+    item.el.lastChild.onclick = () => remove(item);
+    queue.push(item);
+    $('preview').append(item.el);
+  }
+  $('files').value = ''; // lets the same file be picked again after removing it
+  picked();
+}
+
+function remove(item) {
+  URL.revokeObjectURL(item.url);
+  item.el.remove();
+  queue = queue.filter(q => q !== item);
+  picked();
+}
+
+$('files').onchange = () => add($('files').files);
+$('clear').onclick = () => [...queue].forEach(remove);
+['dragenter', 'dragover'].forEach(e => $('drop').addEventListener(e, ev => { ev.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave', 'drop'].forEach(e => $('drop').addEventListener(e, () => $('drop').classList.remove('over')));
+$('drop').addEventListener('drop', ev => { ev.preventDefault(); add(ev.dataTransfer.files); });
+
+// photos are shrunk in the browser before upload (static/compress.js): long side ≤ 2560px, JPEG 85%
+const MAX_SIDE = 2560, QUALITY = 0.85, MB = n => (n / 1048576).toFixed(1) + ' MB';
+
+$('up').onclick = async () => {
+  const total = queue.length, msg = t => $('upmsg').textContent = t, bar = $('upbar');
+  let before = 0, after = 0;
+  if (st.total + total > MAX) return msg(`Too many photos: limit is ${MAX}, this event has ${st.total}. Remove ${st.total + total - MAX}.`);
+  $('up').disabled = true; $('drop').hidden = true; bar.hidden = false;
+  try {
+    while (queue.length) {
+      const batch = queue.slice(0, BATCH), fd = new FormData();
+      for (const [i, q] of batch.entries()) {
+        msg(`Compressing ${total - queue.length + i + 1} of ${total}…`);
+        const f = await compressImage(q.file, MAX_SIDE, MAX_SIDE, QUALITY);
+        before += q.file.size; after += f.size;
+        fd.append('images', f);
+      }
+      msg(`Uploading ${total - queue.length + 1}–${total - queue.length + batch.length} of ${total}…`);
+      const r = await fetch(base + '/upload', { method: 'POST', body: fd });
+      if (!r.ok) return msg('Upload failed: ' + ((await r.json().catch(() => ({}))).error || r.status) + '. Remaining photos kept, try again.');
+      batch.forEach(remove); // drop uploaded ones so a retry doesn't duplicate them
+      bar.firstElementChild.style.width = (100 * (total - queue.length) / total) + '%';
+      msg(`Uploaded ${total - queue.length} of ${total}`);
+    }
+    msg(`Uploaded ${total} photos (${MB(before)} → ${MB(after)}). Face processing queued.`);
+  } catch (e) {
+    msg('Upload failed: ' + e.message + '. Remaining photos kept, try again.');
+  } finally {
+    bar.hidden = true; $('drop').hidden = false; picked();
+    if (queue.length < total) await fetch(base + '/process', { method: 'POST' }); // queue whatever did upload
+    loadPhotos(1); // new uploads are listed first
+    poll();
+  }
+};
+
+$('copy').onclick = async () => {
+  await navigator.clipboard.writeText($('url').value);
+  $('copy').textContent = 'Copied';
+  setTimeout(() => $('copy').textContent = 'Copy', 1500);
+};
+
+$('process').onclick = async () => { await fetch(base + '/process', { method: 'POST' }); poll(); };
+
+render();
+// ---------- uploaded photos: 50 per page, delete with confirmation ----------
+let page = 1, toDelete = null;
+
+async function loadPhotos(p = page) {
+  const r = await (await fetch(`${base}/images?page=${p}`)).json();
+  page = r.page;
+  $('photocount').textContent = r.total ? `(${r.total})` : '';
+  $('nophotos').hidden = r.total > 0 && !r.waiting;
+  $('nophotos').textContent = r.waiting
+    ? `${r.waiting} more photo${r.waiting === 1 ? '' : 's'} will appear here once processed.`
+    : 'No photos uploaded yet.';
+  $('pager').hidden = r.pages < 2;
+  $('pageinfo').textContent = `${r.page} / ${r.pages}`;
+  $('prev').disabled = r.page <= 1;
+  $('next').disabled = r.page >= r.pages;
+  $('photos').replaceChildren(...r.items.map(it => {
+    const el = document.createElement('div');
+    el.innerHTML = '<a target="_blank"><img loading="lazy" alt=""></a><span class="badge"></span>' +
+                   '<button type="button" title="Delete photo" aria-label="Delete photo">×</button>';
+    el.querySelector('a').href = it.url;
+    el.querySelector('img').src = it.thumb; // small; full photo loads only in the preview
+    el.querySelector('a').onclick = e => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button) return; // keep open-in-new-tab
+      e.preventDefault();
+      $('view-img').src = it.url;
+      $('view-img').decode().catch(() => {}).then(() => $('view-dialog').showModal()); // open at final size, no old photo flash
+    };
+    const badge = el.querySelector('.badge');
+    badge.textContent = it.faces === null ? '…' : `${it.faces} face${it.faces === 1 ? '' : 's'}`;
+    badge.title = it.faces === null ? 'Not processed yet' : '';
+    el.querySelector('button').onclick = () => {
+      toDelete = it;
+      $('del-img').src = it.url;
+      $('del-dialog').returnValue = '';
+      $('del-dialog').showModal();
+    };
+    return el;
+  }));
+}
+
+$('view-dialog').onclick = () => $('view-dialog').close(); // click anywhere closes
+$('prev').onclick = () => loadPhotos(page - 1);
+$('next').onclick = () => loadPhotos(page + 1);
+$('del-dialog').onclose = async () => {
+  if ($('del-dialog').returnValue !== 'delete') return;
+  const r = await fetch(`${base}/images/${encodeURIComponent(toDelete.name)}`, { method: 'DELETE' });
+  $('photomsg').textContent = r.ok ? '' : `Delete failed (${r.status}).`;
+  if (r.ok) { st = await r.json(); render(); }
+  loadPhotos(); // stays on this page, or the last one if this page is now empty
+};
+
+picked();
+loadPhotos();
+poll();
+</script>
+{% include '_event_dialog.html' %}
+{% include '_delete_event_dialog.html' %}
+{% endblock %}

@@ -1,0 +1,42 @@
+{# Delete event dialog. Open with any element carrying
+   data-delete='{{ {"action": url_for("delete_event", slug=...), "title": ...}|tojson }}' #}
+<dialog id="del-event-dialog" class="dialog" aria-labelledby="de-heading">
+  <form method="post" class="stack">
+    <h2 id="de-heading" style="margin:0">Delete event?</h2>
+    <p style="margin:0">This permanently deletes <strong id="de-title"></strong> with all its photos and face data.
+      The attendee link and QR code will stop working. This can't be undone.</p>
+    <label class="field">Type <span class="captcha" id="de-code"></span> to confirm
+      <input id="de-input" autocomplete="off" spellcheck="false" autocapitalize="characters">
+    </label>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" type="button" data-close>Cancel</button>
+      <button class="btn danger" id="de-submit" disabled>Delete event</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(() => {
+  const d = document.getElementById('del-event-dialog'), f = d.querySelector('form');
+  const $ = id => document.getElementById(id);
+  const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O, easy to misread
+  let code = '';
+
+  function open(ev) {
+    code = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => ABC[b % ABC.length]).join('');
+    f.action = ev.action;
+    $('de-title').textContent = ev.title;
+    $('de-code').textContent = code;
+    $('de-input').value = '';
+    $('de-submit').disabled = true;
+    d.showModal();
+  }
+
+  // ponytail: confirmation is a UX guard against misclicks, not security (admin has no auth yet)
+  $('de-input').oninput = () => $('de-submit').disabled = $('de-input').value.trim().toUpperCase() !== code;
+  d.addEventListener('click', e => { if (e.target === d || e.target.closest('[data-close]')) d.close(); });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-delete]');
+    if (b) { e.preventDefault(); open(JSON.parse(b.dataset.delete)); }
+  });
+})();
+</script>

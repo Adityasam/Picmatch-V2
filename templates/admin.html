@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}Events · Picmatch{% endblock %}
+{% block nav %}<button class="btn" type="button" data-event="null">+ Add event</button>{% endblock %}
+{% block body %}
+<h1>Your events</h1>
+{% if events %}
+<div class="events">
+  {% for e in events %}
+  <div class="card event">
+    <a href="{{ url_for('admin_event', slug=e.slug) }}">
+      {% if e.thumb %}<img class="cover" src="{{ url_for('thumb', slug=e.slug, v=e.thumb) }}" alt="">
+      {% else %}<div class="cover">{{ e.title[:1] | upper }}</div>{% endif %}
+    </a>
+    <div class="meta row">
+      <a class="grow" href="{{ url_for('admin_event', slug=e.slug) }}"><h3>{{ e.title }}</h3><span class="muted">{{ e.date }}</span></a>
+      <button class="btn ghost" type="button"
+              data-event='{{ {"action": url_for("edit_event", slug=e.slug), "title": e.title, "date": e.date, "thumb": e.thumb}|tojson }}'>Edit</button>
+      <button class="btn ghost bad" type="button" title="Delete event" aria-label="Delete event {{ e.title }}"
+              data-delete='{{ {"action": url_for("delete_event", slug=e.slug), "title": e.title}|tojson }}'>Delete</button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card center stack">
+  <p class="muted" style="margin:0">No events yet.</p>
+  <div><button class="btn" type="button" data-event="null">+ Add your first event</button></div>
+</div>
+{% endif %}
+{% include '_event_dialog.html' %}
+{% include '_delete_event_dialog.html' %}
+{% endblock %}
