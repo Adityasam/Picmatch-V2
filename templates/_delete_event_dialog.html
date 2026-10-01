@@ -2,13 +2,13 @@
    data-delete='{{ {"action": url_for("delete_event", slug=...), "title": ...}|tojson }}' #}
 <dialog id="del-event-dialog" class="dialog" aria-labelledby="de-heading">
   <form method="post" class="stack">
-    <h2 id="de-heading" style="margin:0">Delete event?</h2>
-    <p style="margin:0">This permanently deletes <strong id="de-title"></strong> with all its photos and face data.
+    <h2 class="m0" id="de-heading">Delete event?</h2>
+    <p class="m0">This permanently deletes <strong id="de-title"></strong> with all its photos and face data.
       The attendee link and QR code will stop working. This can't be undone.</p>
     <label class="field">Type <span class="captcha" id="de-code"></span> to confirm
       <input id="de-input" autocomplete="off" spellcheck="false" autocapitalize="characters">
     </label>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div class="actions">
       <button class="btn ghost" type="button" data-close>Cancel</button>
       <button class="btn danger" id="de-submit" disabled>Delete event</button>
     </div>

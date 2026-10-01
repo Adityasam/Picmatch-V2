@@ -18,7 +18,7 @@
 <div class="cols">
   <div class="stack">
     <section class="card stack">
-      <h2 style="margin:0">Upload photos</h2>
+      <h2 class="m0">Upload photos</h2>
       <label class="drop sm" id="drop">
         <input id="files" type="file" multiple accept=".jpg,.jpeg,.png,.webp">
         <strong id="picked">Drop photos or click to browse</strong>
@@ -31,21 +31,21 @@
 
     <section class="card stack">
       <div class="row">
-        <h2 style="margin:0">Face processing</h2>
+        <h2 class="m0">Face processing</h2>
         <span class="pill" id="pill"></span>
       </div>
       <div class="bar" id="procbar"><i></i></div>
-      <p class="muted" id="status" style="margin:0"></p>
+      <p class="muted m0" id="status"></p>
       <button class="btn ghost" id="process" hidden>Process now</button>
 
       <div id="share" class="stack" hidden>
-        <h3 style="margin:0">Share with attendees</h3>
+        <h3 class="m0">Share with attendees</h3>
         <div class="copy">
           <input id="url" readonly value="{{ public_url }}" aria-label="Attendee link">
           <button class="btn ghost" id="copy" type="button">Copy</button>
         </div>
-        <div class="row" style="align-items:flex-start">
-          <div class="qr" style="width:120px;padding:8px"><img src="{{ url_for('qr', slug=slug) }}" alt="QR code for attendee link"></div>
+        <div class="row items-start">
+          <div class="qr qr-sm"><img src="{{ url_for('qr', slug=slug) }}" alt="QR code for attendee link"></div>
           <div class="stack grow">
             <a class="btn ghost block" href="{{ public_url }}" target="_blank">Open page</a>
             <a class="btn ghost block" href="{{ url_for('qr', slug=slug) }}" download="{{ slug }}-qr.svg">Download QR</a>
@@ -57,24 +57,24 @@
 
   <section class="card stack">
     <div class="row">
-      <h2 style="margin:0">Selected photos <span class="muted" id="pickcount"></span></h2>
+      <h2 class="m0">Selected photos <span class="muted" id="pickcount"></span></h2>
       <button class="link" id="clear" type="button" hidden>Clear all</button>
     </div>
-    <p class="muted center" id="noPicks" style="margin:24px 0">Photos you pick will show here. Remove any you don't want before uploading.</p>
+    <p class="muted center my24" id="noPicks">Photos you pick will show here. Remove any you don't want before uploading.</p>
     <div class="grid preview" id="preview"></div>
   </section>
 </div>
 
-<section class="card stack" style="margin-top:20px">
+<section class="card stack mt20">
   <div class="row">
-    <h2 style="margin:0">Event photos <span class="muted" id="photocount"></span></h2>
+    <h2 class="m0">Event photos <span class="muted" id="photocount"></span></h2>
     <div class="pager" id="pager" hidden>
       <button class="btn ghost" id="prev" type="button" aria-label="Previous page">&larr;</button>
       <span class="muted" id="pageinfo"></span>
       <button class="btn ghost" id="next" type="button" aria-label="Next page">&rarr;</button>
     </div>
   </div>
-  <p class="muted center" id="nophotos" style="margin:24px 0" hidden></p>
+  <p class="muted center my24" id="nophotos" hidden></p>
   <p class="note" id="photomsg"></p>
   <div class="grid preview photos" id="photos"></div>
 </section>
@@ -86,10 +86,10 @@
 
 <dialog id="del-dialog" class="dialog" aria-labelledby="del-heading">
   <form method="dialog" class="stack">
-    <h2 id="del-heading" style="margin:0">Delete this photo?</h2>
-    <img id="del-img" alt="" style="display:block;width:100%;max-height:260px;object-fit:contain;border-radius:10px;background:var(--bg)">
-    <p class="muted" style="margin:0">It will be removed from the event and attendees won't find it anymore. This can't be undone.</p>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <h2 class="m0" id="del-heading">Delete this photo?</h2>
+    <img class="confirm-img" id="del-img" alt="">
+    <p class="muted m0">It will be removed from the event and attendees won't find it anymore. This can't be undone.</p>
+    <div class="actions">
       <button class="btn ghost" value="cancel">Cancel</button>
       <button class="btn danger" value="delete">Delete</button>
     </div>

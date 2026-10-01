@@ -4,7 +4,7 @@
 {% block user %}{% endblock %}{# public page: no admin menu #}
 {% block home %}{{ url_for('attend', slug=slug) }}{% endblock %}
 {% block body %}
-<div class="narrow" style="margin:0 auto">
+<div class="narrow mx-auto">
   <div class="hero">
     {% if ev.thumb %}<img class="cover" src="{{ url_for('thumb', slug=slug, v=ev.thumb) }}" alt="">
     {% else %}<div class="cover">{{ ev.title[:1] | upper }}</div>{% endif %}
@@ -22,9 +22,9 @@
     <p class="note" id="msg"></p>
   </section>
 
-  <section id="found" hidden style="margin-top:24px">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px">
-      <h2 style="margin:0" id="count"></h2>
+  <section class="mt24" id="found" hidden>
+    <div class="row mb12">
+      <h2 class="m0" id="count"></h2>
       <button class="btn ghost" id="again">Try again</button>
     </div>
     <div id="results" class="grid results"></div>
@@ -75,19 +75,31 @@ async function startCam() {
   $('step').hidden = false; $('found').hidden = true;
   document.body.classList.add('locked', 'scanning'); scrollTo(0, 0);
 }
+function stopCam() {
+  video.srcObject?.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  $('camwrap').hidden = true; $('find').hidden = true;
+  $('cam').hidden = false; $('cam').textContent = 'Scan again';
+  document.body.classList.remove('scanning');
+}
 $('cam').onclick = startCam;
 $('again').onclick = startCam;
 
 $('find').onclick = async () => {
   const btn = $('find');
   btn.disabled = true; btn.textContent = 'Searching…';
+  // take the picture now and turn the camera off at once; detection runs on this still frame
+  const shot = document.createElement('canvas');
+  shot.width = video.videoWidth; shot.height = video.videoHeight;
+  shot.getContext('2d').drawImage(video, 0, 0);
+  stopCam();
   try {
-    msg('');
+    msg('Finding your photos…');
     await ready;
     const faces = await facesP;
     if (!faces) return msg('Photos are still being processed. Please try again later.');
-    const me = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
-    if (!me) return msg('No face found. Face the camera in good light and try again.');
+    const me = await faceapi.detectSingleFace(shot, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+    if (!me) return msg('No face found. Tap "Scan again", face the camera in good light and try once more.');
 
     const hits = [];
     for (const { n, d } of faces) {
@@ -113,8 +125,6 @@ $('find').onclick = async () => {
       return tile;
     }));
     $('count').textContent = `${found.length} photo${found.length > 1 ? 's' : ''} of you`;
-    video.srcObject.getTracks().forEach(t => t.stop());
-    $('camwrap').hidden = true; $('find').hidden = true; $('cam').hidden = false;
     $('step').hidden = true; $('found').hidden = false;
     document.body.classList.remove('locked', 'scanning'); // results can scroll
   } finally {

@@ -4,7 +4,7 @@
 <div class="cols">
   <form class="card stack" method="post">
     <h2>New user</h2>
-    <p class="muted" style="margin:0;font-size:.9rem">Users log in at <a href="{{ url_for('login') }}">{{ url_for('login', _external=True) }}</a> to manage their events.</p>
+    <p class="muted m0 small">Users log in at <a href="{{ url_for('login') }}">{{ url_for('login', _external=True) }}</a> to manage their events.</p>
     <label class="field">Username <input name="username" required minlength="3" maxlength="32" pattern="[\w.\-]+"
            autocomplete="off" value="{{ request.form.username or '' }}"></label>
     <label class="field">Password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
@@ -25,7 +25,7 @@
         <div class="grow">
           <strong>{{ u.username }}</strong>
           <span class="pill {{ 'ready' if u.active else 'empty' }}">{{ 'Active' if u.active else 'Inactive' }}</span>
-          <div class="muted" style="font-size:.85rem">{{ u.events }} event{{ '' if u.events == 1 else 's' }} · since {{ u.created_at[:10] }}</div>
+          <div class="muted xsmall">{{ u.events }} event{{ '' if u.events == 1 else 's' }} · since {{ u.created_at[:10] }}</div>
         </div>
         <form method="post" action="{{ url_for('set_active', uid=u.id) }}">
           <input type="hidden" name="active" value="{{ 0 if u.active else 1 }}">
@@ -39,18 +39,18 @@
       {% endfor %}
     </ul>
     {% else %}
-    <p class="muted" style="margin:0">No users yet.</p>
+    <p class="muted m0">No users yet.</p>
     {% endif %}
   </section>
 </div>
 
 <dialog id="pw-dialog" class="dialog" aria-labelledby="pw-heading">
   <form method="post" class="stack">
-    <h2 id="pw-heading" style="margin:0">Reset password</h2>
-    <p class="muted" style="margin:0">New password for <strong id="pw-name"></strong>. They'll be logged out on all devices.</p>
+    <h2 class="m0" id="pw-heading">Reset password</h2>
+    <p class="muted m0">New password for <strong id="pw-name"></strong>. They'll be logged out on all devices.</p>
     <label class="field">New password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
     <label class="field">Confirm password <input name="confirm" type="password" required minlength="8" autocomplete="new-password"></label>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div class="actions">
       <button class="btn ghost" type="button" onclick="this.closest('dialog').close()">Cancel</button>
       <button class="btn">Set password</button>
     </div>
@@ -59,10 +59,10 @@
 
 <dialog id="del-user-dialog" class="dialog" aria-labelledby="du-heading">
   <form method="post" class="stack">
-    <h2 id="du-heading" style="margin:0">Delete user?</h2>
-    <p style="margin:0"><strong id="du-name"></strong> will no longer be able to log in and is removed from this list.
+    <h2 class="m0" id="du-heading">Delete user?</h2>
+    <p class="m0"><strong id="du-name"></strong> will no longer be able to log in and is removed from this list.
       Their events and photos are kept, and attendee links keep working.</p>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div class="actions">
       <button class="btn ghost" type="button" onclick="this.closest('dialog').close()">Cancel</button>
       <button class="btn danger">Delete user</button>
     </div>

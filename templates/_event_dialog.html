@@ -3,22 +3,22 @@
 <dialog id="event-dialog" class="dialog" aria-labelledby="ed-heading">
   <form method="post" enctype="multipart/form-data" class="stack">
     <div class="row">
-      <h2 id="ed-heading" style="margin:0">New event</h2>
-      <button type="button" class="link" data-close aria-label="Close" style="font-size:1.5rem;line-height:1">×</button>
+      <h2 class="m0" id="ed-heading">New event</h2>
+      <button type="button" class="link close-x" data-close aria-label="Close">×</button>
     </div>
     <input type="hidden" name="next">
     <label class="field">Title <input name="title" required placeholder="Annual Gala 2026"></label>
     <label class="field">Date <input name="date" type="date" required></label>
     <div>
       <label class="field">Thumbnail <span class="opt" id="ed-hint">(optional)</span></label>
-      <label class="drop" style="margin-top:6px">
+      <label class="drop mt6">
         <input name="thumbnail" type="file" accept=".jpg,.jpeg,.png,.webp">
         <strong id="ed-file">Choose cover image</strong>
         <span class="muted">JPG, PNG or WebP</span>
       </label>
     </div>
     <label id="ed-remove"><input type="checkbox" name="remove_thumb" value="1"> Remove current thumbnail</label>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div class="actions">
       <button class="btn ghost" type="button" data-close>Cancel</button>
       <button class="btn" id="ed-submit">Create event</button>
     </div>
