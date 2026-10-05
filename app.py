@@ -338,6 +338,19 @@ def create_admin(username):
     click.echo(f'Admin {username} created. Log in at /manage/login')
 
 
+@app.cli.command('reset-admin-password')
+@click.argument('username')
+def reset_admin_password(username):
+    """Set a new password for an admin user: flask --app app reset-admin-password <username>"""
+    if not q('SELECT 1 FROM admin_users WHERE username = ?', username):
+        raise click.ClickException(f'No admin named {username}.')
+    pw = click.prompt('New password', hide_input=True, confirmation_prompt=True)
+    if len(pw) < 8:
+        raise click.ClickException('Password must be at least 8 characters.')
+    q('UPDATE admin_users SET password_hash = ? WHERE username = ?', generate_password_hash(pw), username)
+    click.echo(f'Password for admin {username} changed.')
+
+
 # ---------- admin: every route below needs login (load_user) and ownership (my_event) ----------
 
 @app.get('/admin')
