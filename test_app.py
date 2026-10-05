@@ -1,11 +1,13 @@
 # python test_app.py  — smoke check for event create, upload limit, paths API
-import io, json, os, tempfile
+import io, json, os, sys, tempfile
 
 os.environ['PICMATCH_DATA'] = tempfile.mkdtemp()
 import app as picmatch
 
 picmatch.MAX_IMAGES = 2
 c = picmatch.app.test_client()
+queued = []
+picmatch.enqueue = queued.append   # record instead of running the real encoder in tests
 
 # admin users: created by CLI, separate login at /manage; they create general users
 cli = picmatch.app.test_cli_runner()
@@ -20,9 +22,11 @@ boss = picmatch.app.test_client()
 assert boss.get('/manage').headers['Location'].startswith('/manage/login')
 assert b'Wrong username' in boss.post('/manage/login', data={'username': 'root', 'password': 'nope'}).data
 assert boss.post('/manage/login', data={'username': 'root', 'password': 'rootpass1'}).headers['Location'] == '/manage'
-signup = lambda u, pw='secret123', confirm=None: boss.post('/manage', data={'username': u, 'password': pw, 'confirm': confirm or pw})
+signup = lambda u, pw='secret123', confirm=None, credits='0': boss.post(
+    '/manage', data={'username': u, 'password': pw, 'confirm': confirm or pw, 'credits': credits})
 assert signup('x', 'short').status_code == 200                                   # validation error, no redirect
-assert signup('alice').headers['Location'] == '/manage?created=alice'
+assert b'Starting credits' in signup('alice', credits='-5').data                  # bad starting credits
+assert signup('alice', credits='100').headers['Location'] == '/manage?created=alice'
 assert boss.get('/admin').headers['Location'].startswith('/login')               # admin login ≠ user login
 assert c.post('/login', data={'username': 'root', 'password': 'rootpass1'}).status_code == 200  # admins can't use user login
 
@@ -39,14 +43,77 @@ assert c.get(f'/e/{slug}').status_code == 200
 assert c.get('/e/nope').status_code == 404
 
 up = lambda *names: c.post(f'/admin/e/{slug}/upload', content_type='multipart/form-data',
-                           data={'images': [(io.BytesIO(b'x'), n) for n in names]})
-assert up('a.jpg', 'b.txt').json == {'saved': 1}          # .txt skipped
-assert up('c.png', 'd.png').status_code == 400            # over limit
+                           data={'images': [(io.BytesIO(n.encode()), n) for n in names]})   # content = name
+assert up('a.jpg', 'b.txt').json == {'saved': 1, 'skipped': 0, 'available': 99}   # .txt skipped; 1 credit held, none spent
+assert up('c.png', 'd.png').status_code == 400                        # over image limit
+assert queued == [slug]                                               # processing queued by the server itself
+# same photo again (e.g. re-picked after leaving mid-upload): skipped, no hold, not re-queued
+assert up('a.jpg').json == {'saved': 0, 'skipped': 1, 'available': 99} and len(picmatch.images(slug)) == 1
+assert queued == [slug]
+assert b'99' in c.get(f'/admin/e/{slug}').data
+
+# credits: held at upload, charged once per photo as it finishes processing; failed photos are free
+alice = picmatch.q("SELECT id FROM users WHERE username = 'alice'")[0]['id']
+credits = lambda: picmatch.q('SELECT credits FROM users WHERE id = ?', alice)[0]['credits']
+first = picmatch.images(slug)[0]
+assert credits() == 100 and picmatch.available(alice) == 99                         # nothing charged at upload
+picmatch.q('UPDATE users SET credits = 2 WHERE id = ?', alice)                       # 1 held → 1 available
+picmatch.MAX_IMAGES = 1000
+r = up('e.jpg', 'f.jpg')
+assert r.status_code == 402 and r.json['available'] == 1 and len(picmatch.images(slug)) == 1   # nothing saved
+assert up('e.jpg').json == {'saved': 1, 'skipped': 0, 'available': 0}
+assert up('g.jpg').status_code == 402                                               # all credits held
+second = [n for n in picmatch.images(slug) if n != first][0]
+# encoder finishes `first` fine, can't read `second` (err)
+json.dump([{'n': first, 'd': [[0.1]]}, {'n': second, 'd': [], 'err': 1}], open(picmatch.path(slug, 'faces.json'), 'w'))
+picmatch.bill(slug)
+assert credits() == 1 and picmatch.available(alice) == 1                            # 1 charged; failed one free + released
+picmatch.bill(slug)
+assert credits() == 1                                                                # never charged twice
+# deleting a photo that wasn't processed yet releases its hold, no charge
+assert up('h.jpg').json['available'] == 0
+third = [n for n in picmatch.images(slug) if n not in (first, second)][0]
+c.delete(f'/admin/e/{slug}/images/{third}')
+assert picmatch.available(alice) == 1 and credits() == 1
+# admins add credits; every change is logged
+assert 'credit_error=alice' in boss.post(f'/manage/users/{alice}/credits', data={'amount': '0'}).headers['Location']
+assert 'credit_error=alice' in boss.post(f'/manage/users/{alice}/credits', data={'amount': '-3'}).headers['Location']
+assert 'credit_error=alice' in boss.post(f'/manage/users/{alice}/credits', data={'amount': '999999'}).headers['Location']
+assert 'credited=' in boss.post(f'/manage/users/{alice}/credits', data={'amount': '97', 'note': 'INV-7'}).headers['Location']
+assert credits() == 98
+log = picmatch.q('SELECT delta, balance, reason, slug, admin_id FROM credit_log WHERE user_id = ? ORDER BY id', alice)
+assert [(l['delta'], l['reason']) for l in log] == [(100, 'starting credits'), (-1, 'processed'), (97, 'admin grant: INV-7')]
+assert log[1]['slug'] == slug and log[2]['balance'] == 98 and log[2]['admin_id'] is not None
+# worker bills while encode.js is still running (fake encoder: writes one finished photo, then keeps running)
+fake = os.path.join(os.environ['PICMATCH_DATA'], 'fake_encode.py')
+open(fake, 'w').write('import json, sys, time\n'
+                      'json.dump([{"n": "x1.jpg", "d": [[0.1]]}], open(sys.argv[1] + "/faces.json", "w"))\n'
+                      'time.sleep(7)\n')
+s3 = c.post('/admin/new', data={'title': 'Bill test', 'date': '2026-10-06'}).headers['Location'].rsplit('/', 1)[1]
+open(picmatch.path(s3, 'images', 'x1.jpg'), 'wb').write(b'x')
+real_node, real_root = picmatch.NODE, picmatch.ROOT
+picmatch.NODE, picmatch.ROOT = sys.executable, os.environ['PICMATCH_DATA']
+os.rename(fake, os.path.join(picmatch.ROOT, 'encode.js'))
+import threading, time
+t = threading.Thread(target=picmatch.encode, args=(s3,)); t.start()
+time.sleep(6.5)
+assert credits() == 97 and t.is_alive()                                             # charged mid-run
+t.join()
+picmatch.NODE, picmatch.ROOT = real_node, real_root
+assert credits() == 97                                                               # final bill: no double charge
+# tidy: back to one photo in the main event, enough credits for later tests
+for n in picmatch.images(slug):
+    if n != first:
+        os.remove(picmatch.path(slug, 'images', n))
+os.remove(picmatch.path(slug, 'faces.json'))
+boss.post(f'/manage/users/{alice}/credits', data={'amount': '200'})
+picmatch.MAX_IMAGES = 2
+assert b'297</strong> credits' in boss.get('/manage').data
 name = picmatch.images(slug)[0]
 
 assert c.post(f'/api/e/{slug}/paths', json={'names': [name, '../event.json', 'x.jpg']}).json == \
     {name: {'url': f'/i/{slug}/{name}', 'thumb': f'/i/{slug}/{name}'}}              # no thumb yet → original
-assert c.get(f'/i/{slug}/{name}').data == b'x'
+assert c.get(f'/i/{slug}/{name}').data == b'a.jpg'
 assert c.get(f'/admin/e/{slug}/qr.svg').status_code == 200
 # edit: rename, set thumb, replace thumb (old file removed), remove thumb
 edit = lambda **d: c.post(f'/admin/e/{slug}/edit', content_type='multipart/form-data', data={'title': 'Gala', 'date': '2026-10-01', **d})
@@ -148,4 +215,28 @@ assert signup('bob').status_code == 200                                         
 assert anon.post(f'/manage/users/{bob}/active', data={'active': '1'}).headers['Location'].startswith('/manage/login')
 boss.post('/manage/logout')
 assert boss.get('/manage').headers['Location'].startswith('/manage/login')
+
+# same photo twice in one batch: saved once
+c.post('/login', data={'username': 'alice', 'password': 'secret123'})
+s4 = c.post('/admin/new', data={'title': 'Dupes', 'date': '2026-10-07'}).headers['Location'].rsplit('/', 1)[1]
+r = c.post(f'/admin/e/{s4}/upload', content_type='multipart/form-data',
+           data={'images': [(io.BytesIO(b'same'), 'one.jpg'), (io.BytesIO(b'same'), 'two.jpg'), (io.BytesIO(b'other'), 'three.jpg')]})
+assert (r.json['saved'], r.json['skipped']) == (2, 1) and len(picmatch.images(s4)) == 2
+# deleting a photo before the first encoding run must not create an empty faces.json
+c.delete(f'/admin/e/{s4}/images/{picmatch.images(s4)[0]}')
+assert not os.path.exists(picmatch.path(s4, 'faces.json')) and c.get(f'/e/{s4}/faces.json').status_code == 404
+
+# page sends files named by the hash of the original photo: kept as-is; anything else gets hashed server-side
+key = '0123456789abcdef'
+r = c.post(f'/admin/e/{s4}/upload', content_type='multipart/form-data',
+           data={'images': [(io.BytesIO(b'compressed-1'), key + '.jpg'), (io.BytesIO(b'compressed-2'), '../evil.jpg')]})
+assert r.json['saved'] == 2 and key + '.jpg' in picmatch.images(s4) and '../evil.jpg' not in picmatch.images(s4)
+assert all(picmatch.HASH_NAME.fullmatch(os.path.splitext(n)[0]) for n in picmatch.images(s4))
+# same original from another browser compresses differently, but has the same hash name: skipped
+r = c.post(f'/admin/e/{s4}/upload', content_type='multipart/form-data',
+           data={'images': [(io.BytesIO(b'compressed-differently'), key + '.jpg')]})
+assert (r.json['saved'], r.json['skipped']) == (0, 1)
+r = c.post(f'/admin/e/{s4}/known', json={'keys': [key, 'ffffffffffffffff', 7]}).json
+assert r['known'] == [key] and r['available'] == picmatch.available(alice)
+assert anon.post(f'/admin/e/{s4}/known', json={'keys': [key]}).status_code in (302, 404)  # not the owner
 print('ok')
