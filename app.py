@@ -4,7 +4,8 @@ from contextlib import closing
 import click
 import qrcode, qrcode.image.svg
 from dotenv import load_dotenv
-from flask import Flask, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,9 @@ DB = os.path.join(DATA, 'picmatch.db')
 NODE = os.environ.get('PICMATCH_NODE') or shutil.which('node') or 'node'
 
 app = Flask(__name__)
+# Behind nginx: take the visitor's IP and https scheme from X-Forwarded-For/-Proto (one trusted proxy hop).
+# Without this every scan would be logged from 127.0.0.1, and QR links would be http://
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # per request; admin page uploads in batches
 wake = threading.Event()  # nudges the worker when something is queued
 
@@ -72,6 +76,26 @@ q('''CREATE TABLE IF NOT EXISTS events (
     status TEXT NOT NULL DEFAULT 'idle',
     queued_at TEXT,
     user_id INTEGER REFERENCES users(id))''')
+# scans: one row per attendee selfie scan, whatever the outcome (matching itself runs in the browser).
+# result: matched | no_match | no_face | not_ready. No foreign key, so history survives event deletion.
+q('''CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY,
+    slug TEXT NOT NULL,
+    ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ip TEXT,
+    user_agent TEXT,
+    result TEXT NOT NULL,
+    matches INTEGER NOT NULL DEFAULT 0)''')
+q('CREATE INDEX IF NOT EXISTS scans_ts ON scans (ts)')
+# downloads: photo downloads from the results page, linked to the scan that found them
+q('''CREATE TABLE IF NOT EXISTS downloads (
+    id INTEGER PRIMARY KEY,
+    scan_id INTEGER REFERENCES scans(id),
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ip TEXT)''')
+q('CREATE INDEX IF NOT EXISTS downloads_scan ON downloads (scan_id)')
 # a run cut off by a restart/crash goes back in the queue; encode.js resumes from faces.json
 # ponytail: assumes one app process; with several, only reset from a single startup hook
 q("UPDATE events SET status = 'queued' WHERE status = 'processing'")
@@ -351,6 +375,84 @@ def reset_admin_password(username):
     click.echo(f'Password for admin {username} changed.')
 
 
+# ---------- admin users: scan dashboard ----------
+
+SCAN_DAYS = (1, 7, 30, 90, 365)
+RESULT_LABELS = {'matched': 'Photos found', 'no_match': 'No match', 'no_face': 'No face detected',
+                 'not_ready': 'Photos not ready'}
+
+
+@app.template_filter('device')
+def device(ua):
+    # short "Browser · OS" label for the table; the full user agent is in the CSV export
+    ua = ua or ''
+    os_ = next((n for k, n in (('iPhone', 'iPhone'), ('iPad', 'iPad'), ('Android', 'Android'), ('Windows', 'Windows'),
+                               ('Mac OS', 'Mac'), ('CrOS', 'ChromeOS'), ('Linux', 'Linux')) if k in ua), 'Other')
+    br = next((n for k, n in (('SamsungBrowser', 'Samsung'), ('Edg/', 'Edge'), ('OPR/', 'Opera'), ('Firefox', 'Firefox'),
+                              ('FxiOS', 'Firefox'), ('CriOS', 'Chrome'), ('Chrome', 'Chrome'), ('Safari', 'Safari')) if k in ua),
+              'Other')
+    return f'{br} · {os_}'
+
+
+def scan_filter():
+    """WHERE clause + args for the dashboard's period and event filters (shared with the CSV export)."""
+    days = request.args.get('days', 30, type=int)
+    days = days if days in SCAN_DAYS else 30
+    slug = request.args.get('event') or None
+    where, args = "s.ts >= datetime('now', ?)", [f'-{days} days']
+    if slug:
+        where += ' AND s.slug = ?'
+        args.append(slug)
+    return days, slug, where, args
+
+
+@app.get('/manage/scans')
+def scans_dashboard():
+    days, slug, where, args = scan_filter()
+    one = lambda sql: q(sql, *args)[0]
+    totals = one(f'''SELECT COUNT(*) AS scans, COUNT(DISTINCT s.ip) AS visitors,
+                            COALESCE(SUM(s.result = 'matched'), 0) AS matched, COALESCE(SUM(s.matches), 0) AS photos
+                     FROM scans s WHERE {where}''')
+    totals['downloads'] = one(f'SELECT COUNT(*) AS n FROM downloads d JOIN scans s ON s.id = d.scan_id WHERE {where}')['n']
+    results = {r['result']: r['n'] for r in q(f'SELECT s.result, COUNT(*) AS n FROM scans s WHERE {where} GROUP BY 1', *args)}
+    per_day = {r['day']: r for r in q(f'''SELECT date(s.ts) AS day, COUNT(*) AS scans, COUNT(DISTINCT s.ip) AS visitors
+                                          FROM scans s WHERE {where} GROUP BY 1''', *args)}
+    today = q("SELECT date('now') AS d")[0]['d']
+    daily = [per_day.get(d, {'day': d, 'scans': 0, 'visitors': 0}) for d in
+             (r['d'] for r in q("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?) "
+                                "SELECT date(?, '-' || i || ' days') AS d FROM n ORDER BY d", min(days, 90) - 1, today))]
+    events = q(f'''SELECT s.slug, e.title, u.username AS owner, COUNT(*) AS scans, COUNT(DISTINCT s.ip) AS visitors,
+                          SUM(s.result = 'matched') AS matched, SUM(s.matches) AS photos, MAX(s.ts) AS last,
+                          (SELECT COUNT(*) FROM downloads d WHERE d.slug = s.slug AND d.scan_id IN
+                             (SELECT s2.id FROM scans s2 WHERE s2.slug = s.slug AND s2.ts >= datetime('now', ?))) AS downloads
+                   FROM scans s LEFT JOIN events e ON e.slug = s.slug LEFT JOIN users u ON u.id = e.user_id
+                   WHERE {where} GROUP BY s.slug ORDER BY scans DESC''', args[0], *args)
+    recent = q(f'''SELECT s.*, e.title, (SELECT COUNT(*) FROM downloads d WHERE d.scan_id = s.id) AS downloads
+                   FROM scans s LEFT JOIN events e ON e.slug = s.slug
+                   WHERE {where} ORDER BY s.id DESC LIMIT 50''', *args)
+    all_events = q('SELECT DISTINCT s.slug, COALESCE(e.title, s.slug) AS title FROM scans s '
+                   'LEFT JOIN events e ON e.slug = s.slug ORDER BY title')
+    return render_template('scans.html', admin_area=True, days=days, slug=slug, day_options=SCAN_DAYS,
+                           totals=totals, results=results, labels=RESULT_LABELS, daily=daily, events=events,
+                           recent=recent, all_events=all_events, peak=max([d['scans'] for d in daily] + [1]))
+
+
+@app.get('/manage/scans.csv')
+def scans_csv():
+    import csv, io
+    days, slug, where, args = scan_filter()
+    rows = q(f'''SELECT s.id, s.ts, s.slug, e.title, s.ip, s.result, s.matches,
+                        (SELECT COUNT(*) FROM downloads d WHERE d.scan_id = s.id) AS downloads, s.user_agent
+                 FROM scans s LEFT JOIN events e ON e.slug = s.slug WHERE {where} ORDER BY s.id''', *args)
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(['scan_id', 'time_utc', 'event_slug', 'event_title', 'ip', 'result', 'photos_found', 'downloads', 'user_agent'])
+    w.writerows([r['id'], r['ts'], r['slug'], r['title'] or '(deleted)', r['ip'], r['result'], r['matches'],
+                 r['downloads'], r['user_agent']] for r in rows)
+    name = f"picmatch-scans-{slug or 'all'}-{days}d.csv"
+    return Response(out.getvalue(), mimetype='text/csv', headers={'Content-Disposition': f'attachment; filename={name}'})
+
+
 # ---------- admin: every route below needs login (load_user) and ownership (my_event) ----------
 
 @app.get('/admin')
@@ -484,8 +586,14 @@ def faces_json(slug):
     return send_from_directory(path(slug), 'faces.json', max_age=60)
 
 
+def record_scan(slug, result, matches=0):
+    return q('INSERT INTO scans (slug, ip, user_agent, result, matches) VALUES (?, ?, ?, ?, ?) RETURNING id',
+             slug, request.remote_addr, request.user_agent.string[:400], result, matches)[0]['id']
+
+
 @app.post('/api/e/<slug>/paths')
 def paths(slug):
+    # called once per scan that matched faces in the browser, so this is where matched scans are recorded
     event(slug)
     have = set(images(slug))
     names = (request.get_json(silent=True) or {}).get('names', [])
@@ -493,12 +601,31 @@ def paths(slug):
         url = url_for('image', slug=slug, name=n)
         has_thumb = os.path.isfile(path(slug, 'thumbs', n + '.jpg'))
         return {'url': url, 'thumb': url_for('thumb_image', slug=slug, name=n) if has_thumb else url}
-    return jsonify({n: urls(n) for n in names[:MAX_IMAGES] if isinstance(n, str) and n in have})
+    found = {n: urls(n) for n in names[:MAX_IMAGES] if isinstance(n, str) and n in have}
+    scan_id = record_scan(slug, 'matched' if found else 'no_match', len(found))
+    resp = jsonify(found)
+    resp.headers['X-Scan-Id'] = str(scan_id)  # the page tags its download links with it
+    return resp
+
+
+@app.post('/api/e/<slug>/scan')
+def report_scan(slug):
+    # scans that end in the browser without a match (no face / no match / photos not processed yet)
+    event(slug)
+    result = (request.get_json(silent=True) or {}).get('result')
+    if result not in ('no_match', 'no_face', 'not_ready'):
+        abort(400)
+    return jsonify(id=record_scan(slug, result)), 201
 
 
 @app.get('/i/<slug>/<name>')
 def image(slug, name):
     event(slug)
+    if request.args.get('dl') and name in images(slug):  # download button on the results page
+        scan = request.args.get('s', type=int)
+        if scan and not q('SELECT 1 FROM scans WHERE id = ? AND slug = ?', scan, slug):
+            scan = None
+        q('INSERT INTO downloads (scan_id, slug, name, ip) VALUES (?, ?, ?, ?)', scan, slug, name, request.remote_addr)
     return send_from_directory(path(slug, 'images'), name, max_age=86400)
 
 

@@ -20,6 +20,12 @@
     {% if admin_area %}<span class="pill">Admin</span>{% endif %}
   </a>
   <div class="topnav">
+    {% if admin_area and g.admin %}
+    <nav class="adminnav" aria-label="Admin">
+      <a href="{{ url_for('manage') }}" class="{{ 'on' if request.endpoint == 'manage' }}">Users</a>
+      <a href="{{ url_for('scans_dashboard') }}" class="{{ 'on' if request.endpoint == 'scans_dashboard' }}">Scans</a>
+    </nav>
+    {% endif %}
     {% block nav %}{% endblock %}
     {% block user %}
     {% set who, out = (g.admin, url_for('admin_logout')) if admin_area else (g.user, url_for('logout')) %}
