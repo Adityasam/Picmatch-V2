@@ -81,6 +81,7 @@
 </section>
 
 <dialog id="view-dialog" class="dialog viewer" aria-label="Photo">
+  <span class="spinner" role="status" aria-label="Loading photo"></span>
   <img id="view-img" alt="Event photo">
   <button type="button" class="close" aria-label="Close">×</button>
 </dialog>
@@ -304,8 +305,7 @@ async function loadPhotos(p = page) {
     el.querySelector('a').onclick = e => {
       if (e.ctrlKey || e.metaKey || e.shiftKey || e.button) return; // keep open-in-new-tab
       e.preventDefault();
-      $('view-img').src = it.url;
-      $('view-img').decode().catch(() => {}).then(() => $('view-dialog').showModal()); // open at final size, no old photo flash
+      openViewer(it.url);
     };
     const badge = el.querySelector('.badge');
     badge.textContent = it.faces === null ? '…' : `${it.faces} face${it.faces === 1 ? '' : 's'}`;
@@ -321,6 +321,15 @@ async function loadPhotos(p = page) {
 }
 
 $('view-dialog').onclick = () => $('view-dialog').close(); // click anywhere closes
+// open at once with a spinner; the photo replaces it when loaded (onload of an older src never fires once src changes)
+function openViewer(url) {
+  const d = $('view-dialog'), img = $('view-img');
+  d.classList.add('loading');
+  img.onload = img.onerror = () => d.classList.remove('loading');
+  img.removeAttribute('src'); // drop the previous photo so it doesn't flash
+  img.src = url;
+  if (!d.open) d.showModal();
+}
 $('prev').onclick = () => loadPhotos(page - 1);
 $('next').onclick = () => loadPhotos(page + 1);
 $('del-dialog').onclose = async () => {
