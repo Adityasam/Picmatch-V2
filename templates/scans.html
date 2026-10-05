@@ -1,0 +1,100 @@
+{% extends 'base.html' %}
+{% block title %}Scans · Picmatch admin{% endblock %}
+{% block body %}
+<div class="row mb12 scans-head">
+  <h1 class="m0">Scans</h1>
+  <form class="filters" method="get">
+    <select name="event" aria-label="Event" onchange="this.form.submit()">
+      <option value="">All events</option>
+      {% for e in all_events %}<option value="{{ e.slug }}" {{ 'selected' if e.slug == slug }}>{{ e.title }}</option>{% endfor %}
+    </select>
+    <select name="days" aria-label="Period" onchange="this.form.submit()">
+      {% for d in day_options %}<option value="{{ d }}" {{ 'selected' if d == days }}>{{ 'Last 24 hours' if d == 1 else 'Last %d days' % d }}</option>{% endfor %}
+    </select>
+    <noscript><button class="btn ghost">Apply</button></noscript>
+    <a class="btn ghost" href="{{ url_for('scans_csv', days=days, event=slug) }}">Export CSV</a>
+  </form>
+</div>
+
+<div class="stats">
+  <div class="card stat"><span class="muted xsmall">Scans</span><strong>{{ totals.scans }}</strong></div>
+  <div class="card stat"><span class="muted xsmall">Unique IPs</span><strong>{{ totals.visitors }}</strong></div>
+  <div class="card stat"><span class="muted xsmall">Found photos</span>
+    <strong>{{ (100 * totals.matched / totals.scans)|round|int if totals.scans else 0 }}%</strong>
+    <span class="muted xsmall">{{ totals.matched }} of {{ totals.scans }} scans</span></div>
+  <div class="card stat"><span class="muted xsmall">Photos delivered</span><strong>{{ totals.photos }}</strong></div>
+  <div class="card stat"><span class="muted xsmall">Downloads</span><strong>{{ totals.downloads }}</strong></div>
+</div>
+
+{% if totals.scans %}
+<div class="cols2">
+  <section class="card">
+    <h2 class="m0">Scans per day</h2>
+    <p class="muted xsmall mt6">Bar = scans · number on hover = scans / unique IPs{% if days > 90 %} · last 90 days shown{% endif %}</p>
+    <div class="chart" role="img" aria-label="Scans per day">
+      {% for d in daily %}
+      <div class="col" title="{{ d.day }}: {{ d.scans }} scans, {{ d.visitors }} unique IPs">
+        <i style="height: {{ (100 * d.scans / peak)|round(1) }}%"></i>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="row xsmall muted"><span>{{ daily[0].day }}</span><span>{{ daily[-1].day }}</span></div>
+  </section>
+  <section class="card">
+    <h2 class="m0">Outcomes</h2>
+    <ul class="outcomes">
+      {% for key, label in labels.items() %}{% set n = results.get(key, 0) %}
+      <li><div class="row xsmall"><span>{{ label }}</span><span class="muted">{{ n }}</span></div>
+        <div class="bar"><i class="o-{{ key }}" style="width: {{ (100 * n / totals.scans)|round(1) }}%"></i></div></li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+
+{% if not slug %}
+<section class="card mt20">
+  <h2 class="m0 mb12">By event</h2>
+  <div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>Event</th><th>Owner</th><th class="num">Scans</th><th class="num">Unique IPs</th>
+      <th class="num">Found</th><th class="num">Downloads</th><th>Last scan (UTC)</th></tr></thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td><a href="{{ url_for('scans_dashboard', days=days, event=e.slug) }}">{{ e.title or e.slug ~ ' (deleted)' }}</a></td>
+        <td class="muted">{{ e.owner or '—' }}</td>
+        <td class="num">{{ e.scans }}</td><td class="num">{{ e.visitors }}</td>
+        <td class="num">{{ (100 * e.matched / e.scans)|round|int }}%</td>
+        <td class="num">{{ e.downloads }}</td>
+        <td class="muted">{{ e.last[:16] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+<section class="card mt20">
+  <h2 class="m0">Recent scans</h2>
+  <p class="muted xsmall mt6">Latest {{ recent|length }}{% if recent|length == 50 %} · use Export CSV for the full list{% endif %} · times in UTC</p>
+  <div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>Time</th>{% if not slug %}<th>Event</th>{% endif %}<th>IP</th><th>Device</th><th>Outcome</th>
+      <th class="num">Photos</th><th class="num">Downloads</th></tr></thead>
+    <tbody>
+      {% for s in recent %}
+      <tr>
+        <td class="nowrap">{{ s.ts[:16] }}</td>
+        {% if not slug %}<td>{{ s.title or s.slug ~ ' (deleted)' }}</td>{% endif %}
+        <td class="mono">{{ s.ip or '—' }}</td>
+        <td class="muted nowrap" title="{{ s.user_agent }}">{{ s.user_agent|device }}</td>
+        <td><span class="pill o-{{ s.result }}">{{ labels.get(s.result, s.result) }}</span></td>
+        <td class="num">{{ s.matches or '' }}</td>
+        <td class="num">{{ s.downloads or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% else %}
+<div class="card center"><p class="muted m0">No scans {{ 'for this event ' if slug }}in this period yet.</p></div>
+{% endif %}
+{% endblock %}

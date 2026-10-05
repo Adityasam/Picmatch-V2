@@ -44,13 +44,18 @@ const SLUG = {{ slug|tojson }};
 const THRESHOLD = 0.45; // max face distance for a match; lower = stricter (fewer wrong photos, more missed)
 const $ = id => document.getElementById(id);
 const video = $('video'), msg = t => $('msg').textContent = t;
+let dlq = '';  // "?dl=1&s=<scan id>" on download links, so downloads are counted per scan
+// scans that end without a match are reported too (matched scans are recorded by the /paths call)
+const report = result => fetch(`/api/e/${SLUG}/scan`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result }), keepalive: true,
+}).catch(() => {});
 const DL_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" ' +
   'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>';
 $('view-dl').innerHTML = DL_ICON;
 
 function preview(url, name) {
   $('view-img').src = url;
-  $('view-dl').href = url; $('view-dl').download = name;
+  $('view-dl').href = url + dlq; $('view-dl').download = name;
   $('view-img').decode().catch(() => {}).then(() => $('view-dialog').showModal());
 }
 // tap anywhere closes, except the download button
@@ -97,9 +102,9 @@ $('find').onclick = async () => {
     msg('Finding your photos…');
     await ready;
     const faces = await facesP;
-    if (!faces) return msg('Photos are still being processed. Please try again later.');
+    if (!faces) { report('not_ready'); return msg('Photos are still being processed. Please try again later.'); }
     const me = await faceapi.detectSingleFace(shot, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
-    if (!me) return msg('No face found. Tap "Scan again", face the camera in good light and try once more.');
+    if (!me) { report('no_face'); return msg('No face found. Tap "Scan again", face the camera in good light and try once more.'); }
 
     const hits = [];
     for (const { n, d } of faces) {
@@ -107,12 +112,15 @@ $('find').onclick = async () => {
       if (best < THRESHOLD) hits.push([best, n]);
     }
     hits.sort((a, b) => a[0] - b[0]);
-    if (!hits.length) return msg('No matching photos. Try again with a clearer selfie.');
+    if (!hits.length) { report('no_match'); return msg('No matching photos. Try again with a clearer selfie.'); }
 
-    const urls = await (await fetch(`/api/e/${SLUG}/paths`, {
+    const res = await fetch(`/api/e/${SLUG}/paths`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ names: hits.map(h => h[1]) }),
-    })).json();
+    });
+    const scanId = res.headers.get('X-Scan-Id');
+    dlq = scanId ? `?dl=1&s=${encodeURIComponent(scanId)}` : '?dl=1';
+    const urls = await res.json();
 
     const found = hits.filter(h => urls[h[1]]);
     $('results').replaceChildren(...found.map(([, n]) => {
@@ -121,7 +129,7 @@ $('find').onclick = async () => {
       tile.innerHTML = `<img loading="lazy" alt="Event photo"><a class="dl" title="Download" aria-label="Download photo">${DL_ICON}</a>`;
       tile.querySelector('img').src = urls[n].thumb; // small; full photo only in preview/download
       tile.querySelector('img').onclick = () => preview(urls[n].url, n);
-      Object.assign(tile.querySelector('a'), { href: urls[n].url, download: n });
+      Object.assign(tile.querySelector('a'), { href: urls[n].url + dlq, download: n });
       return tile;
     }));
     $('count').textContent = `${found.length} photo${found.length > 1 ? 's' : ''} of you`;
