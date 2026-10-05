@@ -11,6 +11,11 @@ c = picmatch.app.test_client()
 cli = picmatch.app.test_cli_runner()
 assert cli.invoke(args=['create-admin', 'root'], input='rootpass1\nrootpass1\n').exit_code == 0
 assert cli.invoke(args=['create-admin', 'ROOT'], input='rootpass1\nrootpass1\n').exit_code != 0   # taken
+assert cli.invoke(args=['reset-admin-password', 'nobody'], input='x\n').exit_code != 0         # unknown admin
+assert cli.invoke(args=['reset-admin-password', 'root'], input='short\nshort\n').exit_code != 0  # too short
+assert cli.invoke(args=['reset-admin-password', 'root'], input='newroot12\nnewroot12\n').exit_code == 0
+assert picmatch.check_password_hash(picmatch.q("SELECT password_hash FROM admin_users WHERE username = 'root'")[0]['password_hash'], 'newroot12')
+assert cli.invoke(args=['reset-admin-password', 'root'], input='rootpass1\nrootpass1\n').exit_code == 0
 boss = picmatch.app.test_client()
 assert boss.get('/manage').headers['Location'].startswith('/manage/login')
 assert b'Wrong username' in boss.post('/manage/login', data={'username': 'root', 'password': 'nope'}).data
