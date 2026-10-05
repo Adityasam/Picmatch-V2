@@ -62,9 +62,10 @@ function save(faces) {
     const todo = fs.readdirSync(path.join(dir, 'images')).filter(n => !done.has(n));
     if (!todo.length) break;
     for (const [i, n] of todo.entries()) {
-      let d = [];
-      try { d = await processImage(path.join(dir, 'images', n)); } catch (e) { console.error(n, e.message); }
-      faces.push({ n, d }); // d: [] marks unreadable/no-face images as done
+      let d = [], err = false;
+      try { d = await processImage(path.join(dir, 'images', n)); } catch (e) { err = true; console.error(n, e.message); }
+      // d: [] = processed, no face found. err: couldn't be processed, so the app won't charge a credit for it
+      faces.push(err ? { n, d, err: 1 } : { n, d });
       console.log(`${i + 1}/${todo.length} ${n} faces=${d.length}`);
       if ((i + 1) % 10 === 0) save(faces); // progress for admin page; attendees get partial results early
     }

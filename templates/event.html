@@ -24,6 +24,7 @@
         <strong id="picked">Drop photos or click to browse</strong>
         <span class="muted">Up to {{ max_images }} · JPG, PNG, WebP</span>
       </label>
+      <p class="muted m0 small" id="credits-line"></p>
       <button class="btn block" id="up" disabled>Upload</button>
       <div class="bar" id="upbar" hidden><i></i></div>
       <p class="note" id="upmsg"></p>
@@ -98,8 +99,16 @@
 
 <script>
 const MAX = {{ max_images }}, BATCH = 20;
+// credits are charged as each photo finishes processing; until then they're held, not spent
+let credits = {{ available }};
+function showCredits(n) {
+  credits = n;
+  $('credits-line').innerHTML = `<strong>${n}</strong> credit${n === 1 ? '' : 's'} available · ` +
+    '1 credit per photo, charged once it is processed';
+}
 const base = '/admin/e/{{ slug }}';
 const $ = id => document.getElementById(id);
+showCredits(credits);
 let st = {{ status|tojson }};
 
 function render() {
@@ -173,33 +182,90 @@ $('drop').addEventListener('drop', ev => { ev.preventDefault(); add(ev.dataTrans
 // photos are shrunk in the browser before upload (static/compress.js): long side ≤ 2560px, JPEG 85%
 const MAX_SIDE = 2560, QUALITY = 0.85, MB = n => (n / 1048576).toFixed(1) + ' MB';
 
+// photo name = first 16 hex chars of the SHA-256 of the ORIGINAL file: same photo, same name, from any browser
+// (crypto.subtle only exists on HTTPS/localhost; without it, return '' and the server hashes the upload instead)
+async function photoKey(file) {
+  if (!crypto.subtle) return '';
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
+  return Array.from(h.slice(0, 8), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// warn before closing or leaving the page mid-upload (photos not yet sent would be lost)
+let uploading = false;
+addEventListener('beforeunload', e => { if (uploading) e.preventDefault(); });
+
 $('up').onclick = async () => {
   const total = queue.length, msg = t => $('upmsg').textContent = t, bar = $('upbar');
-  let before = 0, after = 0;
-  if (st.total + total > MAX) return msg(`Too many photos: limit is ${MAX}, this event has ${st.total}. Remove ${st.total + total - MAX}.`);
-  $('up').disabled = true; $('drop').hidden = true; bar.hidden = false;
+  let before = 0, after = 0, skipped = 0;
+  $('up').disabled = true; $('drop').hidden = true; bar.hidden = false; uploading = true;
   try {
+    // 1. check everything before sending anything: which photos are new, and are there enough credits
+    for (const [i, q] of queue.entries()) {
+      if (i % 10 === 0) msg(`Checking photos ${i + 1}–${Math.min(i + 10, total)} of ${total}…`);
+      q.key ??= await photoKey(q.file);
+    }
+    const r0 = await fetch(base + '/known', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ keys: [...new Set(queue.map(q => q.key).filter(Boolean))] }) });
+    if (!r0.ok) throw new Error(`check failed (${r0.status})`);
+    const { known: knownList, available } = await r0.json();
+    showCredits(available);
+    const known = new Set(knownList), unique = new Set();
+    let fresh = 0; // photos that will actually be uploaded (and later charged)
+    for (const q of queue) {
+      if (!q.key) fresh++;                                   // no hash (non-HTTPS): the server dedupes
+      else if (!known.has(q.key) && !unique.has(q.key)) { unique.add(q.key); fresh++; }
+    }
+    const photos = k => `${k} photo${k === 1 ? '' : 's'}`;
+    if (!fresh) {
+      [...queue].forEach(remove);
+      return msg(`Nothing new: ${total === 1 ? 'that photo is' : `all ${total} photos are`} already in this event.`);
+    }
+    if (st.total + fresh > MAX) {
+      return msg(`Too many photos: limit is ${MAX} per event, it has ${st.total} and ${photos(fresh)} are new. ` +
+                 `Remove ${st.total + fresh - MAX}.`);
+    }
+    if (fresh > available) {
+      const credit = k => `${k} credit${k === 1 ? '' : 's'}`;
+      return msg(`Not enough credits: ${photos(fresh)} to upload ${fresh === 1 ? 'needs' : 'need'} ${credit(fresh)}, you have ${available}. ` +
+                 `Remove ${photos(fresh - available)} or ask the Picmatch team for more credits.`);
+    }
+
+    // 2. upload in batches, skipping photos already in the event and repeats within this upload
+    const sent = new Set();
     while (queue.length) {
-      const batch = queue.slice(0, BATCH), fd = new FormData();
-      for (const [i, q] of batch.entries()) {
-        msg(`Compressing ${total - queue.length + i + 1} of ${total}…`);
-        const f = await compressImage(q.file, MAX_SIDE, MAX_SIDE, QUALITY);
-        before += q.file.size; after += f.size;
-        fd.append('images', f);
+      const batch = queue.slice(0, BATCH), done = total - queue.length;
+      const send = batch.filter(q => !q.key || (!known.has(q.key) && !sent.has(q.key)));
+      send.forEach(q => q.key && sent.add(q.key));
+      skipped += batch.length - send.length;
+      if (send.length) {
+        const fd = new FormData();
+        for (const [i, q] of send.entries()) {
+          msg(`Compressing ${done + i + 1} of ${total}…`);
+          const f = await compressImage(q.file, MAX_SIDE, MAX_SIDE, QUALITY);
+          before += q.file.size; after += f.size;
+          const ext = f.type === 'image/jpeg' ? '.jpg' : q.file.name.slice(q.file.name.lastIndexOf('.'));
+          fd.append('images', f, (q.key || 'photo') + ext);
+        }
+        msg(`Uploading ${done + 1}–${done + batch.length} of ${total}…`);
+        const r = await fetch(base + '/upload', { method: 'POST', body: fd });
+        const res = await r.json().catch(() => ({}));
+        if (res.available !== undefined) showCredits(res.available);
+        if (!r.ok) return msg('Upload failed: ' + (res.error || r.status) + '. Remaining photos kept.');
+        skipped += res.skipped || 0; // e.g. the same photo uploaded from another tab meanwhile
       }
-      msg(`Uploading ${total - queue.length + 1}–${total - queue.length + batch.length} of ${total}…`);
-      const r = await fetch(base + '/upload', { method: 'POST', body: fd });
-      if (!r.ok) return msg('Upload failed: ' + ((await r.json().catch(() => ({}))).error || r.status) + '. Remaining photos kept, try again.');
       batch.forEach(remove); // drop uploaded ones so a retry doesn't duplicate them
       bar.firstElementChild.style.width = (100 * (total - queue.length) / total) + '%';
       msg(`Uploaded ${total - queue.length} of ${total}`);
     }
-    msg(`Uploaded ${total} photos (${MB(before)} → ${MB(after)}). Face processing queued.`);
+    const n = total - skipped;
+    msg(n ? `Uploaded ${photos(n)} (${MB(before)} → ${MB(after)})` +
+            (skipped ? `, skipped ${photos(skipped)} already in this event` : '') + '. Face processing queued.'
+          : `Nothing new: ${skipped === 1 ? 'that photo is' : `all ${skipped} photos are`} already in this event.`);
   } catch (e) {
     msg('Upload failed: ' + e.message + '. Remaining photos kept, try again.');
   } finally {
     bar.hidden = true; $('drop').hidden = false; picked();
-    if (queue.length < total) await fetch(base + '/process', { method: 'POST' }); // queue whatever did upload
+    uploading = false; // the server queues processing after every batch, so nothing else to do here
     loadPhotos(1); // new uploads are listed first
     poll();
   }

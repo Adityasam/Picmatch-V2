@@ -1,4 +1,4 @@
-import json, os, re, secrets, shutil, sqlite3, subprocess, threading, time, traceback
+import hashlib, json, os, re, secrets, shutil, sqlite3, subprocess, threading, time, traceback
 from contextlib import closing
 
 import click
@@ -12,7 +12,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(ROOT, '.env'))  # real environment variables win; works under gunicorn/systemd too
 DATA = os.environ.get('PICMATCH_DATA', os.path.join(ROOT, 'data'))
 MAX_IMAGES = 1000
+MAX_GRANT = 100000  # largest single credit grant, guards against typos like an extra zero
 EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
+HASH_NAME = re.compile(r'[0-9a-f]{16}')  # photo file name: first 16 hex chars of its SHA-256
 DB = os.path.join(DATA, 'picmatch.db')
 # full path, because services (systemd, supervisor) often run with a PATH that has no node on it
 NODE = os.environ.get('PICMATCH_NODE') or shutil.which('node') or 'node'
@@ -23,6 +25,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # per request; admin page uploads in batches
 wake = threading.Event()  # nudges the worker when something is queued
+upload_lock = threading.Lock()
 
 
 def path(slug, *p):
@@ -65,7 +68,28 @@ q('''CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     active INTEGER NOT NULL DEFAULT 1,
-    deleted_at TEXT)''')
+    deleted_at TEXT,
+    credits INTEGER NOT NULL DEFAULT 0)''')
+
+
+def add_column(table, col, decl):
+    # tiny migration for databases created before the column existed
+    if col not in {r['name'] for r in q(f'PRAGMA table_info({table})')}:
+        q(f'ALTER TABLE {table} ADD COLUMN {col} {decl}')
+
+
+add_column('users', 'credits', 'INTEGER NOT NULL DEFAULT 0')
+# credit_log: every balance change (admin grant, upload charge, refund) with the balance after it, for auditing
+q('''CREATE TABLE IF NOT EXISTS credit_log (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    delta INTEGER NOT NULL,
+    balance INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    slug TEXT,
+    admin_id INTEGER REFERENCES admin_users(id),
+    ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+q('CREATE INDEX IF NOT EXISTS credit_log_user ON credit_log (user_id, ts)')
 # status: idle | queued | processing | failed. Progress/ready/empty come from the files (images/ vs faces.json).
 q('''CREATE TABLE IF NOT EXISTS events (
     slug TEXT PRIMARY KEY,
@@ -99,6 +123,76 @@ q('CREATE INDEX IF NOT EXISTS downloads_scan ON downloads (scan_id)')
 # a run cut off by a restart/crash goes back in the queue; encode.js resumes from faces.json
 # ponytail: assumes one app process; with several, only reset from a single startup hook
 q("UPDATE events SET status = 'queued' WHERE status = 'processing'")
+# photo_charges: one row per photo that has been charged, so a photo is never charged twice
+first_billing = not q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'photo_charges'")
+q('''CREATE TABLE IF NOT EXISTS photo_charges (
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    user_id INTEGER,
+    ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (slug, name))''')
+if first_billing:
+    # photos uploaded before per-photo billing were already paid at upload time: mark them paid
+    with closing(sqlite3.connect(DB)) as _c, _c:
+        for _slug, _uid in _c.execute('SELECT slug, user_id FROM events').fetchall():
+            _dir = os.path.join(DATA, _slug, 'images')
+            if os.path.isdir(_dir):
+                _c.executemany('INSERT OR IGNORE INTO photo_charges (slug, name, user_id) VALUES (?, ?, ?)',
+                               [(_slug, n, _uid) for n in os.listdir(_dir)])
+
+
+def change_credits(uid, delta, reason, slug=None, admin_id=None):
+    """Add (delta > 0) or spend (delta < 0) credits atomically. Returns the new balance,
+    or None if spending more than the user has (nothing changes then)."""
+    with closing(sqlite3.connect(DB)) as c, c:  # one transaction: balance and log change together
+        row = c.execute('UPDATE users SET credits = credits + ? WHERE id = ? AND credits + ? >= 0 RETURNING credits',
+                        (delta, uid, delta)).fetchone()
+        if row is None:
+            return None
+        c.execute('INSERT INTO credit_log (user_id, delta, balance, reason, slug, admin_id) VALUES (?, ?, ?, ?, ?, ?)',
+                  (uid, delta, row[0], reason, slug, admin_id))
+        return row[0]
+
+
+def bill(slug):
+    """Charge 1 credit for each photo encode.js has finished (in faces.json without an error flag),
+    once per photo. Called by the worker while encoding runs, so credits go as photos complete;
+    photos that fail or never get processed are never charged."""
+    ev = q('SELECT user_id FROM events WHERE slug = ?', slug)
+    if not ev or not ev[0]['user_id']:
+        return
+    uid = ev[0]['user_id']
+    charged = {r['name'] for r in q('SELECT name FROM photo_charges WHERE slug = ?', slug)}
+    new = sorted({x['n'] for x in faces(slug) if not x.get('err')} - charged)
+    if not new:
+        return
+    with closing(sqlite3.connect(DB)) as c, c:  # charge rows, balance and log in one transaction
+        added = sum(c.execute('INSERT OR IGNORE INTO photo_charges (slug, name, user_id) VALUES (?, ?, ?)',
+                              (slug, n, uid)).rowcount for n in new)
+        if added:
+            # holds at upload (available()) keep this from going below zero
+            bal = c.execute('UPDATE users SET credits = credits - ? WHERE id = ? RETURNING credits',
+                            (added, uid)).fetchone()[0]
+            c.execute('INSERT INTO credit_log (user_id, delta, balance, reason, slug) VALUES (?, ?, ?, ?, ?)',
+                      (uid, -added, bal, 'processed', slug))
+
+
+def held(uid):
+    """Photos uploaded but not charged yet (waiting for or in processing). Their credits are held, so a
+    user can't upload more photos than their balance covers. Photos encode.js couldn't read aren't held."""
+    n = 0
+    for ev in q('SELECT slug FROM events WHERE user_id = ?', uid):
+        s = ev['slug']
+        if not os.path.isdir(path(s, 'images')):
+            continue
+        charged = {r['name'] for r in q('SELECT name FROM photo_charges WHERE slug = ?', s)}
+        failed = {x['n'] for x in faces(s) if x.get('err')}
+        n += len(set(images(s)) - charged - failed)  # ponytail: scans every event's files; cache if users get 100s of events
+    return n
+
+
+def available(uid):
+    return q('SELECT credits FROM users WHERE id = ?', uid)[0]['credits'] - held(uid)
 
 
 def event(slug):
@@ -137,14 +231,29 @@ def pending(slug):
     return len(set(images(slug)) - {x['n'] for x in faces(slug)})
 
 
+def safe_bill(slug):
+    try:
+        bill(slug)
+    except Exception:  # billing trouble must not stop or kill the encoder; next call retries
+        traceback.print_exc()
+
+
 def encode(slug):
     with open(path(slug, 'encode.log'), 'w') as log:
         try:
-            rc = subprocess.run([NODE, os.path.join(ROOT, 'encode.js'), path(slug)],
-                                stdout=log, stderr=subprocess.STDOUT).returncode
+            proc = subprocess.Popen([NODE, os.path.join(ROOT, 'encode.js'), path(slug)],
+                                    stdout=log, stderr=subprocess.STDOUT)
         except OSError as e:  # e.g. node not found: record it instead of killing the worker
             log.write(f'could not start {NODE}: {e}\n')
             rc = 1
+        else:
+            while True:
+                try:
+                    rc = proc.wait(timeout=5)
+                    break
+                except subprocess.TimeoutExpired:
+                    safe_bill(slug)  # charge photos finished so far (encode.js saves faces.json every 10)
+    safe_bill(slug)  # whatever finished, even if the run crashed part-way
     # photos uploaded right as the run ended → run again
     after = 'failed' if rc else 'queued' if os.path.isdir(path(slug)) and pending(slug) else 'idle'
     q("UPDATE events SET status = ?, queued_at = CURRENT_TIMESTAMP WHERE slug = ? AND status = 'processing'",
@@ -204,7 +313,7 @@ ensure_worker()
 def load_user():
     ensure_worker()
     uid, aid = session.get('uid'), session.get('admin_uid')
-    g.user = (q('SELECT id, username, password_hash FROM users WHERE id = ? AND active = 1 AND deleted_at IS NULL', uid)
+    g.user = (q('SELECT id, username, password_hash, credits FROM users WHERE id = ? AND active = 1 AND deleted_at IS NULL', uid)
               or [None])[0] if uid else None  # checked every request: deactivating logs the user out at once
     if g.user and session.get('pwv') != pw_version(g.user['password_hash']):
         g.user = None  # password was reset since this login: log out everywhere
@@ -304,18 +413,24 @@ def manage():
     if request.method == 'POST':
         name, pw = request.form.get('username', '').strip(), request.form.get('password', '')
         error = account_error('users', name, pw, request.form.get('confirm', ''))
+        start = request.form.get('credits', '0').strip() or '0'
+        if not error and (not start.isdigit() or int(start) > MAX_GRANT):
+            error = f'Starting credits must be a whole number from 0 to {MAX_GRANT}.'
         if not error:
             first = not q('SELECT 1 FROM users LIMIT 1')
             uid = q('INSERT INTO users (username, password_hash) VALUES (?, ?) RETURNING id',
                     name, generate_password_hash(pw))[0]['id']
             if first:
                 q('UPDATE events SET user_id = ? WHERE user_id IS NULL', uid)  # events made before users existed
+            if int(start):
+                change_credits(uid, int(start), 'starting credits', admin_id=g.admin['id'])
             return redirect(url_for('manage', created=name))
-    users = q('SELECT u.id, u.username, u.created_at, u.active, COUNT(e.slug) AS events FROM users u '
+    users = q('SELECT u.id, u.username, u.created_at, u.active, u.credits, COUNT(e.slug) AS events FROM users u '
               'LEFT JOIN events e ON e.user_id = u.id WHERE u.deleted_at IS NULL GROUP BY u.id ORDER BY u.created_at')
     return render_template('users.html', error=error, created=request.args.get('created'), users=users,
                            reset=request.args.get('reset'), reset_error=request.args.get('reset_error'),
-                           admin_area=True)
+                           credited=request.args.get('credited'), credit_error=request.args.get('credit_error'),
+                           max_grant=MAX_GRANT, admin_area=True)
 
 
 def managed_user(uid):
@@ -340,6 +455,17 @@ def reset_password(uid):
         return redirect(url_for('manage', reset_error=user['username']))
     q('UPDATE users SET password_hash = ? WHERE id = ?', generate_password_hash(pw), uid)
     return redirect(url_for('manage', reset=user['username']))
+
+
+@app.post('/manage/users/<int:uid>/credits')
+def add_credits(uid):
+    user = managed_user(uid)
+    amount = request.form.get('amount', '').strip()
+    if not amount.isdigit() or not 1 <= int(amount) <= MAX_GRANT:
+        return redirect(url_for('manage', credit_error=user['username']))
+    note = request.form.get('note', '').strip()[:200]
+    change_credits(uid, int(amount), 'admin grant' + (f': {note}' if note else ''), admin_id=g.admin['id'])
+    return redirect(url_for('manage', credited=f"{amount} credits to {user['username']}"))
 
 
 @app.post('/manage/users/<int:uid>/delete')
@@ -506,18 +632,56 @@ def delete_event(slug):
 @app.get('/admin/e/<slug>')
 def admin_event(slug):
     return render_template('event.html', slug=slug, ev=my_event(slug), status=status(slug),
+                           credits=g.user['credits'], available=available(g.user['id']),
                            max_images=MAX_IMAGES, public_url=url_for('attend', slug=slug, _external=True))
 
 
 @app.post('/admin/e/<slug>/upload')
 def upload(slug):
     my_event(slug)
-    files = [f for f in request.files.getlist('images') if os.path.splitext(f.filename)[1].lower() in EXTS]
-    if len(images(slug)) + len(files) > MAX_IMAGES:
+    # name = hash of the photo, so the same photo uploaded again (e.g. re-picked after leaving the page
+    # mid-upload) is skipped: no duplicate, no extra credit. The page names files by the hash of the
+    # ORIGINAL file (same name from any browser, before compression); otherwise hash what arrived.
+    # Older uploads keep their random names.
+    have = {os.path.splitext(n)[0] for n in images(slug)}
+    new, skipped = {}, 0
+    for f in request.files.getlist('images'):
+        stem, ext = os.path.splitext(f.filename)
+        ext = ext.lower()
+        if ext not in EXTS:
+            continue
+        data = f.read()
+        key = stem if HASH_NAME.fullmatch(stem) else hashlib.sha256(data).hexdigest()[:16]
+        if key in have or key in new:
+            skipped += 1
+            continue
+        new[key] = (ext, data)
+    if len(have) + len(new) > MAX_IMAGES:
         return jsonify(error=f'limit is {MAX_IMAGES} images per event'), 400
-    for f in files:
-        f.save(path(slug, 'images', secrets.token_hex(8) + os.path.splitext(f.filename)[1].lower()))
-    return jsonify(saved=len(files))
+    # nothing is charged here: 1 credit per photo is taken when it finishes processing (bill()).
+    # Lock so two uploads at once can't both pass the check and hold more than the balance.
+    # ponytail: process-local lock, fine with one app process (gunicorn -w 1)
+    with upload_lock:
+        free = available(g.user['id'])
+        if len(new) > free:
+            return jsonify(error=f'Not enough credits: these {len(new)} photos need {len(new)}, '
+                                 f'you have {free} available', available=free), 402
+        for key, (ext, data) in new.items():
+            with open(path(slug, 'images', key + ext), 'wb') as out:
+                out.write(data)
+    if new:
+        enqueue(slug)  # start processing now, even if the page is closed before the upload finishes
+    return jsonify(saved=len(new), skipped=skipped, available=free - len(new))
+
+
+@app.post('/admin/e/<slug>/known')
+def known_photos(slug):
+    # which of these photo hashes the event already has, plus current available credits, so the page can
+    # skip duplicates and refuse up front when the new photos need more credits than the user has
+    my_event(slug)
+    have = {os.path.splitext(n)[0] for n in images(slug)}
+    keys = (request.get_json(silent=True) or {}).get('keys', [])
+    return jsonify(known=[k for k in keys if isinstance(k, str) and k in have], available=available(g.user['id']))
 
 
 @app.get('/admin/e/<slug>/images')
@@ -545,7 +709,9 @@ def delete_image(slug, name):
     os.remove(path(slug, 'images', name))
     if os.path.isfile(path(slug, 'thumbs', name + '.jpg')):
         os.remove(path(slug, 'thumbs', name + '.jpg'))
-    if ev['status'] != 'processing':  # while encoding, encode.js drops it on its next save (it skips missing files)
+    # while encoding, encode.js drops it on its next save (it skips missing files). No faces.json yet: nothing to
+    # update, and creating an empty one would tell attendees "no match" instead of "still processing"
+    if ev['status'] != 'processing' and os.path.isfile(path(slug, 'faces.json')):
         tmp = path(slug, 'faces.json.tmp')
         with open(tmp, 'w') as f:
             json.dump([x for x in faces(slug) if x['n'] != name], f)

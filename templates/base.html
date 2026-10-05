@@ -32,6 +32,7 @@
     {% if who %}
     <span class="menu">
       <span class="muted who">{{ who.username }}</span>
+      {% if not admin_area %}<span class="pill" title="1 credit per photo uploaded">{{ who.credits }} credit{{ '' if who.credits == 1 else 's' }}</span>{% endif %}
       <form method="post" action="{{ out }}"><button class="link">Log out</button></form>
     </span>
     {% endif %}
