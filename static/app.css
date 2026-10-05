@@ -110,6 +110,10 @@ input:focus { border-color: var(--tide); box-shadow: 0 0 0 3px var(--pool); }
 
 .cam { position: relative; width: 100%; border-radius: 20px; overflow: hidden; background: #000; }
 .cam video { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+.cam.rear video { transform: none; }  /* rear camera: not mirrored */
+.cam .flip { position: absolute; top: 10px; right: 10px; z-index: 1; width: 44px; height: 44px; display: grid; place-items: center;
+             border: 0; border-radius: 50%; cursor: pointer; color: #fff; background: rgba(0, 0, 0, .5); }
+.cam .flip:hover { background: rgba(0, 0, 0, .7); }
 .cam::after { content: ""; position: absolute; left: 50%; top: 47%; height: 72%; max-width: 80%; aspect-ratio: 3/4;
               transform: translate(-50%, -50%); border-radius: 50%;
               border: 3px dashed rgba(255,255,255,.75); pointer-events: none; }
@@ -181,6 +185,13 @@ body.scanning .hero .caption h1 { font-size: 1.1rem; }
 .viewer { width: fit-content; max-width: none; max-height: none; inset: 0; margin: auto; padding: 0;
           overflow: hidden; border: 0; border-radius: 12px; background: transparent; cursor: zoom-out; }
 .viewer img { display: block; width: auto; height: auto; max-width: 94vw; max-height: 90vh; }
+/* while the full photo loads: small dark box with a spinner instead of the photo */
+.viewer .spinner { display: none; }
+.viewer.loading { width: 140px; height: 140px; background: rgba(20, 16, 12, .85); }
+.viewer.loading img { display: none; }
+.viewer.loading .spinner { display: block; position: absolute; inset: 0; margin: auto; width: 38px; height: 38px;
+  border: 4px solid rgba(255, 255, 255, .25); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .viewer .close { position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; border: 0; border-radius: 50%;
                  cursor: pointer; font: 700 20px/1 inherit; color: #fff; background: rgba(0,0,0,.6); }
 .btn.ghost.bad { background: var(--bad-soft); color: var(--bad); }

@@ -16,7 +16,12 @@
     <h2>Find your photos</h2>
     <p class="muted" id="intro">Take a quick selfie and we'll show every photo you appear in.
       Your face is processed only on this device and never uploaded.</p>
-    <div class="cam" id="camwrap" hidden><video id="video" autoplay playsinline muted></video></div>
+    <div class="cam" id="camwrap" hidden>
+      <video id="video" autoplay playsinline muted></video>
+      <button class="flip" id="flip" type="button" hidden aria-label="Switch camera" title="Switch camera">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/><path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/><circle cx="12" cy="12" r="3"/><path d="m18 22-3-3 3-3"/><path d="m6 2 3 3-3 3"/></svg>
+      </button>
+    </div>
     <button class="btn lg block" id="cam">Start camera</button>
     <button class="btn lg block" id="find" hidden>Find my photos</button>
     <p class="note" id="msg"></p>
@@ -32,6 +37,7 @@
 </div>
 
 <dialog id="view-dialog" class="dialog viewer" aria-label="Photo">
+  <span class="spinner" role="status" aria-label="Loading photo"></span>
   <img id="view-img" alt="Event photo">
   <button type="button" class="close" aria-label="Close">×</button>
   <a class="dl" id="view-dl" download title="Download" aria-label="Download photo"></a>
@@ -54,9 +60,14 @@ const DL_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" str
 $('view-dl').innerHTML = DL_ICON;
 
 function preview(url, name) {
-  $('view-img').src = url;
+  // open at once with a spinner; the photo replaces it when loaded
+  const d = $('view-dialog'), img = $('view-img');
   $('view-dl').href = url + dlq; $('view-dl').download = name;
-  $('view-img').decode().catch(() => {}).then(() => $('view-dialog').showModal());
+  d.classList.add('loading');
+  img.onload = img.onerror = () => d.classList.remove('loading');
+  img.removeAttribute('src'); // drop the previous photo so it doesn't flash
+  img.src = url;
+  if (!d.open) d.showModal();
 }
 // tap anywhere closes, except the download button
 $('view-dialog').onclick = e => { if (!e.target.closest('.dl')) $('view-dialog').close(); };
@@ -69,12 +80,24 @@ const ready = Promise.all([
 ]);
 const facesP = fetch(`/e/${SLUG}/faces.json`).then(r => r.ok ? r.json() : null);
 
+// open a camera; front camera preview is mirrored like a selfie, rear camera isn't
+async function openCam(video_constraints) {
+  video.srcObject?.getTracks().forEach(t => t.stop());
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video: video_constraints });
+  const s = video.srcObject.getVideoTracks()[0].getSettings();
+  $('camwrap').classList.toggle('rear', s.facingMode === 'environment');
+  return s;
+}
+
 async function startCam() {
   try {
-    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+    await openCam({ facingMode: 'user' });
   } catch (e) {
     return msg('Camera not available: ' + e.message);
   }
+  // switch button only when there's more than one camera (device names/ids are available once permission is given)
+  const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  $('flip').hidden = cams.length < 2;
   msg('Center your face in the oval, then tap the button.');
   $('camwrap').hidden = false; $('cam').hidden = true; $('find').hidden = false; $('intro').hidden = true; $('mark').hidden = true;
   $('step').hidden = false; $('found').hidden = true;
@@ -88,6 +111,19 @@ function stopCam() {
   document.body.classList.remove('scanning');
 }
 $('cam').onclick = startCam;
+
+// phones: toggle front/back. Laptops with 2 webcams usually don't report front/back, so cycle through devices instead.
+$('flip').onclick = async () => {
+  const cur = video.srcObject?.getVideoTracks()[0]?.getSettings() || {};
+  try {
+    await openCam({ facingMode: { exact: cur.facingMode === 'environment' ? 'user' : 'environment' } });
+  } catch {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const next = cams[(cams.findIndex(c => c.deviceId === cur.deviceId) + 1) % cams.length];
+    try { await openCam({ deviceId: { exact: next.deviceId } }); }
+    catch (e) { msg('Could not switch camera: ' + e.message); }
+  }
+};
 $('again').onclick = startCam;
 
 $('find').onclick = async () => {
